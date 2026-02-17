@@ -1,0 +1,181 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
+
+// ===== НАСТРОЙКИ =====
+#define AP_SSID "Система управления"
+#define DNS_PORT 53
+
+WebServer server(80);
+DNSServer dnsServer;
+Preferences prefs;
+
+// ===== СОСТОЯНИЕ =====
+bool needRestartAP = false;
+unsigned long restartAt = 0;
+
+// ===== ПРОТОТИПЫ =====
+void startAccessPoint();
+void restartAccessPoint();
+String loadPassword();
+void savePassword(const String& pwd);
+
+// ===== HTML =====
+const char PAGE_MAIN[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>WiFi</title></head>
+<body>
+<h2>Настройка подключения</h2>
+<a href="/no_password"><button>Продолжить без пароля</button></a><br><br>
+<a href="/set_password"><button>Создать пароль</button></a>
+</body>
+</html>
+)rawliteral";
+
+const char PAGE_SET_PASSWORD[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Пароль</title></head>
+<body>
+<h2>Создание пароля</h2>
+<form action="/save_password" method="post">
+Пароль (минимум 8 символов):<br>
+<input type="password" name="p1"><br>
+Повтор:<br>
+<input type="password" name="p2"><br><br>
+<input type="submit" value="Сохранить">
+</form>
+<br>
+<a href="/"><button>Отмена</button></a>
+</body>
+</html>
+)rawliteral";
+
+const char PAGE_SAVED[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="5">
+<title>Готово</title>
+</head>
+<body>
+<h2>Пароль сохранён</h2>
+<p><b>Точка доступа будет перезапущена.</b></p>
+<p>Подключитесь заново к сети<br><b>«Система управления»</b><br>и введите пароль.</p>
+</body>
+</html>
+)rawliteral";
+
+const char PAGE_START[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Старт</title></head>
+<body>
+<h2>Стартовая страница</h2>
+<p>AP работает</p>
+</body>
+</html>
+)rawliteral";
+
+// ===== SETUP =====
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+
+  startAccessPoint();
+
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+
+  server.on("/", []() {
+    server.send(200, "text/html", PAGE_MAIN);
+  });
+
+  server.on("/no_password", []() {
+    server.send(200, "text/html", PAGE_START);
+  });
+
+  server.on("/set_password", []() {
+    server.send(200, "text/html", PAGE_SET_PASSWORD);
+  });
+
+  server.on("/save_password", HTTP_POST, []() {
+    String p1 = server.arg("p1");
+    String p2 = server.arg("p2");
+
+    if (p1 != p2 || p1.length() < 8) {
+      server.send(200, "text/html",
+        "<h3>Ошибка пароля</h3><a href='/set_password'>Назад</a>");
+      return;
+    }
+
+    savePassword(p1);
+
+    server.send(200, "text/html", PAGE_SAVED);
+
+    needRestartAP = true;
+    restartAt = millis() + 3000;  // 3 секунды
+  });
+
+  server.onNotFound([]() {
+    server.sendHeader("Location",
+      String("http://") + WiFi.softAPIP().toString(), true);
+    server.send(302, "text/plain", "");
+  });
+
+  server.begin();
+  Serial.println("WEB сервер запущен");
+}
+
+// ===== LOOP =====
+void loop() {
+  dnsServer.processNextRequest();
+  server.handleClient();
+
+  if (needRestartAP && millis() > restartAt) {
+    restartAccessPoint();
+    needRestartAP = false;
+  }
+}
+
+// ===== AP =====
+void startAccessPoint() {
+  WiFi.mode(WIFI_AP);
+
+  String pwd = loadPassword();
+
+  if (pwd.length() >= 8) {
+    WiFi.softAP(AP_SSID, pwd.c_str());
+    Serial.println("AP с паролем");
+  } else {
+    WiFi.softAP(AP_SSID);
+    Serial.println("AP без пароля");
+  }
+
+  delay(500);
+  Serial.print("IP: ");
+  Serial.println(WiFi.softAPIP());
+}
+
+void restartAccessPoint() {
+  Serial.println("Перезапуск AP...");
+  WiFi.softAPdisconnect(true);
+  delay(500);
+  startAccessPoint();
+}
+
+// ===== NVS =====
+String loadPassword() {
+  prefs.begin("wifi", true);
+  String p = prefs.getString("ap_pwd", "");
+  prefs.end();
+  return p;
+}
+
+void savePassword(const String& pwd) {
+  prefs.begin("wifi", false);
+  prefs.putString("ap_pwd", pwd);
+  prefs.end();
+}
