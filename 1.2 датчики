@@ -1,0 +1,214 @@
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <Adafruit_BMP085.h>
+
+/* ---------- Пины ---------- */
+
+#define ONE_WIRE_PIN 4
+
+#define PIN_LEVEL   32
+#define PIN_FLOW    33
+#define PIN_POWER   34
+
+#define RELAY_HEAT  25
+#define RELAY_COOL  26
+#define RELAY_BUZZ  27
+#define RELAY_BELL  14
+
+/* ---------- Датчики ---------- */
+
+OneWire oneWire(ONE_WIRE_PIN);
+DallasTemperature ds(&oneWire);
+Adafruit_BMP085 bmp;
+
+/* ---------- Типы ---------- */
+
+enum SensorType {
+  TEMP,
+  PRESSURE,
+  DIGITAL,
+  VIRTUAL
+};
+
+enum Condition {
+  ABOVE,
+  BELOW
+};
+
+/* ---------- Структуры ---------- */
+
+struct Sensor {
+  String name;
+  SensorType type;
+  float value;
+  float alarmLow;
+  float alarmHigh;
+  bool alarm;
+  bool connected;
+};
+
+struct Relay {
+  String name;
+  uint8_t pin;
+  bool state;
+};
+
+struct Rule {
+  int sensorIndex;
+  Condition cond;
+  float threshold;
+  int relayIndex;
+  bool relayState;
+};
+
+struct Event {
+  unsigned long timeMs;
+  String text;
+};
+
+/* ---------- Константы ---------- */
+
+#define SENSOR_COUNT 8
+#define RELAY_COUNT  4
+#define RULE_COUNT   4
+#define EVENT_LOG_SIZE 50
+
+/* ---------- Глобальные ---------- */
+
+Sensor sensors[SENSOR_COUNT];
+Relay relays[RELAY_COUNT];
+Rule rules[RULE_COUNT];
+
+Event logBuf[EVENT_LOG_SIZE];
+int logPos = 0;
+
+/* ---------- Журнал ---------- */
+
+void logEvent(const String &msg) {
+  logBuf[logPos++] = { millis(), msg };
+  if (logPos >= EVENT_LOG_SIZE) logPos = 0;
+}
+
+/* ---------- Реле ---------- */
+
+void setRelay(int i, bool state) {
+  if (relays[i].state != state) {
+    relays[i].state = state;
+    digitalWrite(relays[i].pin, state ? HIGH : LOW);
+    logEvent("Реле " + relays[i].name + (state ? " ВКЛ" : " ВЫКЛ"));
+  }
+}
+
+/* ---------- Проверка правил ---------- */
+
+void checkRules() {
+  for (int i = 0; i < RULE_COUNT; i++) {
+    Sensor &s = sensors[rules[i].sensorIndex];
+    if (!s.connected) continue;
+
+    bool trigger = false;
+
+    if (rules[i].cond == ABOVE && s.value > rules[i].threshold) trigger = true;
+    if (rules[i].cond == BELOW && s.value < rules[i].threshold) trigger = true;
+
+    if (trigger) {
+      setRelay(rules[i].relayIndex, rules[i].relayState);
+    }
+  }
+}
+
+/* ---------- Проверка аварий ---------- */
+
+void checkAlarm(Sensor &s) {
+  if (!s.connected) return;
+
+  bool now = (s.value < s.alarmLow || s.value > s.alarmHigh);
+
+  if (now && !s.alarm) {
+    s.alarm = true;
+    logEvent("Авария: " + s.name);
+  }
+  if (!now && s.alarm) {
+    s.alarm = false;
+    logEvent("Авария снята: " + s.name);
+  }
+}
+
+/* ---------- Setup ---------- */
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIN_LEVEL, INPUT_PULLUP);
+  pinMode(PIN_FLOW, INPUT_PULLUP);
+  pinMode(PIN_POWER, INPUT_PULLUP);
+
+  pinMode(RELAY_HEAT, OUTPUT);
+  pinMode(RELAY_COOL, OUTPUT);
+  pinMode(RELAY_BUZZ, OUTPUT);
+  pinMode(RELAY_BELL, OUTPUT);
+
+  ds.begin();
+  bmp.begin();
+
+  sensors[0] = {"T1", TEMP, 0, -10, 80, false, true};
+  sensors[1] = {"T2", TEMP, 0, -10, 80, false, true};
+  sensors[2] = {"T3", TEMP, 0, -10, 80, false, true};
+  sensors[3] = {"P", PRESSURE, 0, 900, 1100, false, true};
+  sensors[4] = {"L", DIGITAL, 0, 0, 0, false, true};
+  sensors[5] = {"F", DIGITAL, 0, 0, 0, false, true};
+  sensors[6] = {"Pw", DIGITAL, 0, 0, 0, false, true};
+  sensors[7] = {"dT", VIRTUAL, 0, -20, 20, false, true};
+
+  relays[0] = {"Нагрев", RELAY_HEAT, false};
+  relays[1] = {"Охлаждение", RELAY_COOL, false};
+  relays[2] = {"Буззер", RELAY_BUZZ, false};
+  relays[3] = {"Звонок", RELAY_BELL, false};
+
+  rules[0] = {0, BELOW, 30.0, 0, true};
+  rules[1] = {0, ABOVE, 70.0, 1, true};
+  rules[2] = {4, BELOW, 1, 2, true};
+  rules[3] = {6, BELOW, 1, 3, true};
+
+  logEvent("Загрузка системы");
+}
+
+/* ---------- Loop ---------- */
+
+void loop() {
+  ds.requestTemperatures();
+
+  sensors[0].value = ds.getTempCByIndex(0);
+  sensors[1].value = ds.getTempCByIndex(1);
+  sensors[2].value = ds.getTempCByIndex(2);
+
+  sensors[3].value = bmp.readPressure() / 100.0;
+
+  sensors[4].value = digitalRead(PIN_LEVEL);
+  sensors[5].value = digitalRead(PIN_FLOW);
+  sensors[6].value = digitalRead(PIN_POWER);
+
+  sensors[7].value = sensors[0].value - sensors[1].value;
+
+  for (int i = 0; i < SENSOR_COUNT; i++) {
+    checkAlarm(sensors[i]);
+  }
+
+  checkRules();
+
+  /* ---------- ВЫВОД ДЛЯ ПРОВЕРКИ ---------- */
+
+  Serial.print("T1 = ");
+  Serial.print(sensors[0].value);
+  Serial.print(" °C | ");
+
+  if (sensors[0].value == DEVICE_DISCONNECTED_C) {
+    Serial.println("ОШИБКА ДАТЧИКА");
+  } else if (sensors[0].alarm) {
+    Serial.println("АВАРИЯ");
+  } else {
+    Serial.println("Норма");
+  }
+
+  delay(1000);
+}
