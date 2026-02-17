@@ -1,0 +1,135 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Preferences.h>
+
+WebServer server(80);
+Preferences prefs;
+
+const char* AP_NAME = "Система управления";
+String apPassword = "";
+
+bool needReboot = false;
+
+/* ---------- HTML ---------- */
+
+String htmlHeader(String title) {
+  return "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+         "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+         "<title>" + title + "</title>"
+         "<style>"
+         "body{font-family:Arial;background:#f2f2f2;margin:0;padding:20px;}"
+         ".box{background:#fff;padding:20px;border-radius:8px;max-width:400px;margin:auto;}"
+         "h1{font-size:22px;text-align:center;}"
+         "input,button{width:100%;padding:10px;margin:8px 0;font-size:16px;}"
+         "button{background:#2196F3;color:white;border:none;border-radius:4px;}"
+         "a{display:block;text-align:center;margin-top:15px;color:#2196F3;text-decoration:none;}"
+         ".warn{color:red;text-align:center;}"
+         "</style></head><body>";
+}
+
+String htmlFooter() {
+  return "</body></html>";
+}
+
+/* ---------- Pages ---------- */
+
+void handleRoot() {
+  String page = htmlHeader("Система");
+  page += "<div class='box'>";
+  page += "<h1>Система управления</h1>";
+  page += "<p>Система работает нормально.</p>";
+  page += "<a href='/config'>Настройки Wi-Fi</a>";
+  page += "</div>";
+  page += htmlFooter();
+  server.send(200, "text/html", page);
+}
+
+void handleConfig() {
+  String page = htmlHeader("Настройки");
+  page += "<div class='box'>";
+  page += "<h1>Пароль точки доступа</h1>";
+
+  if (apPassword.length() > 0) {
+    page += "<p>Пароль уже установлен.</p>";
+  } else {
+    page += "<p>Пароль не установлен.</p>";
+  }
+
+  page += "<form method='POST' action='/save'>";
+  page += "<input type='password' name='p1' placeholder='Новый пароль (от 4 символов)' required>";
+  page += "<input type='password' name='p2' placeholder='Повторите пароль' required>";
+  page += "<button type='submit'>Сохранить</button>";
+  page += "</form>";
+
+  page += "<a href='/'>Назад</a>";
+  page += "</div>";
+  page += htmlFooter();
+
+  server.send(200, "text/html", page);
+}
+
+void handleSave() {
+  String p1 = server.arg("p1");
+  String p2 = server.arg("p2");
+
+  String page = htmlHeader("Результат");
+  page += "<div class='box'>";
+
+  if (p1 != p2) {
+    page += "<p class='warn'>Пароли не совпадают</p>";
+  } else if (p1.length() < 4) {
+    page += "<p class='warn'>Пароль слишком короткий</p>";
+  } else {
+    prefs.putString("ap_pass", p1);
+    page += "<p>Пароль сохранён.</p>";
+    page += "<p>Точка доступа будет перезапущена.</p>";
+    needReboot = true;
+  }
+
+  page += "<a href='/'>На главную</a>";
+  page += "</div>";
+  page += htmlFooter();
+
+  server.send(200, "text/html", page);
+}
+
+/* ---------- Wi-Fi ---------- */
+
+void startAP() {
+  WiFi.mode(WIFI_AP);
+
+  if (apPassword.length() >= 4) {
+    WiFi.softAP(AP_NAME, apPassword.c_str());
+  } else {
+    WiFi.softAP(AP_NAME);
+  }
+
+  Serial.println("AP started");
+  Serial.println(WiFi.softAPIP());
+}
+
+/* ---------- Setup / Loop ---------- */
+
+void setup() {
+  Serial.begin(115200);
+
+  prefs.begin("wifi", false);
+  apPassword = prefs.getString("ap_pass", "");
+
+  startAP();
+
+  server.on("/", handleRoot);
+  server.on("/config", handleConfig);
+  server.on("/save", HTTP_POST, handleSave);
+
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+
+  if (needReboot) {
+    delay(2000);
+    ESP.restart();
+  }
+}
