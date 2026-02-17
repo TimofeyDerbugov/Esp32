@@ -1,0 +1,176 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <Preferences.h>
+
+/* ================= НАСТРОЙКИ ================= */
+#define AP_SSID   "System-Control"
+#define DNS_PORT  53
+
+/* ================= ОБЪЕКТЫ ================= */
+WebServer server(80);
+DNSServer dnsServer;
+Preferences prefs;
+
+/* ================= СОСТОЯНИЕ ================= */
+bool apHasPassword = false;
+String apPassword  = "";
+
+/* ================= HTML ================= */
+
+const char PAGE_START[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Настройка WiFi</title>
+<style>
+body { font-family: Arial; background:#f2f2f2; padding:20px; }
+.card { background:#fff; padding:20px; border-radius:8px; }
+button { padding:10px 16px; margin:8px 0; width:100%; }
+</style>
+</head>
+<body>
+<div class="card">
+<h2>Подключение к системе</h2>
+<button onclick="location.href='/nopass'">Продолжить без пароля</button>
+<button onclick="location.href='/setpass'">Создать пароль</button>
+</div>
+</body>
+</html>
+)rawliteral";
+
+const char PAGE_SET_PASS[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Создание пароля</title>
+<style>
+body { font-family: Arial; background:#f2f2f2; padding:20px; }
+.card { background:#fff; padding:20px; border-radius:8px; }
+input { padding:8px; margin:6px 0; width:100%; }
+button { padding:10px 16px; margin-top:10px; width:100%; }
+.warn { color:#b00000; }
+</style>
+</head>
+<body>
+<div class="card">
+<h2>Пароль точки доступа</h2>
+<form method="POST" action="/savepass">
+<input type="password" name="p1" placeholder="Введите пароль" required>
+<input type="password" name="p2" placeholder="Повторите пароль" required>
+<p class="warn">Подключение без пароля будет невозможно. Не потеряйте!</p>
+<button type="submit">Сохранить</button>
+</form>
+</div>
+</body>
+</html>
+)rawliteral";
+
+const char PAGE_MAIN[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Система управления</title>
+<style>
+body { font-family: Arial; background:#f2f2f2; padding:20px; }
+.card { background:#fff; padding:20px; border-radius:8px; }
+</style>
+</head>
+<body>
+<div class="card">
+<h2>Система управления</h2>
+<p>Начальная настройка завершена.</p>
+</div>
+</body>
+</html>
+)rawliteral";
+
+/* ================= WIFI ================= */
+
+void startAccessPoint() {
+  WiFi.mode(WIFI_AP);
+
+  if (apHasPassword) {
+    WiFi.softAP(AP_SSID, apPassword.c_str());
+  } else {
+    WiFi.softAP(AP_SSID);
+  }
+
+  delay(200);
+  dnsServer.start(DNS_PORT, "*", WiFi.softAPIP());
+}
+
+/* ================= WEB ================= */
+
+void setupWebServer() {
+
+  server.on("/", []() {
+    if (apHasPassword) {
+      server.send(200, "text/html", PAGE_MAIN);
+    } else {
+      server.send(200, "text/html", PAGE_START);
+    }
+  });
+
+  server.on("/nopass", []() {
+    server.send(200, "text/html", PAGE_MAIN);
+  });
+
+  server.on("/setpass", []() {
+    server.send(200, "text/html", PAGE_SET_PASS);
+  });
+
+  server.on("/savepass", HTTP_POST, []() {
+    String p1 = server.arg("p1");
+    String p2 = server.arg("p2");
+
+    if (p1 != p2 || p1.length() < 8) {
+      server.send(400, "text/plain", "Ошибка пароля");
+      return;
+    }
+
+    prefs.begin("wifi", false);
+    prefs.putString("ap_pass", p1);
+    prefs.end();
+
+    server.send(200, "text/html",
+      "<h3>Пароль сохранён. Переподключитесь к сети.</h3>");
+
+    delay(1000);
+    ESP.restart();
+  });
+
+  server.onNotFound([]() {
+    server.send(200, "text/html", PAGE_START);
+  });
+
+  server.begin();
+}
+
+/* ================= SETUP ================= */
+
+void setup() {
+  Serial.begin(115200);
+
+  prefs.begin("wifi", true);
+  apPassword = prefs.getString("ap_pass", "");
+  prefs.end();
+
+  apHasPassword = apPassword.length() >= 8;
+
+  startAccessPoint();
+  setupWebServer();
+}
+
+/* ================= LOOP ================= */
+
+void loop() {
+  dnsServer.processNextRequest();
+  server.handleClient();
+}
